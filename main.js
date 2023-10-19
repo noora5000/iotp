@@ -1,12 +1,29 @@
 import express from 'express';
 import cors from 'cors'
 import fs from 'fs'
-
+// Lisää toiminta maxVisitors muuttamiseen
 const port = process.env.PORT || 3001;
+let countsJson = {}
+let inCount=0;
+let outCount=0;
+let maxVisitors = 10;
+// lue json-tallennustiedosto:
+try{
+  countsJson = JSON.parse(fs.readFileSync('counts.json'))
+} catch(error){
+  console.log("Error reading counts.json")
+}
+// funktio kulkujen summaamiseen. Parametrina lista portin (sisään tai ulos) kuluista
+const calculateSum = (array) => {
+  let sumCount = 0;
+  sumCount = array.reduce((acc, currentElement) => {
+    return acc + parseInt(currentElement.count);
+  }, 0)
+  return sumCount
+}
 
-// fetch the list of all in and out passings from JSON-file
-const counts = fs.readFileSync('counts.json')
-const jsonCounts = JSON.parse(counts)
+inCount = calculateSum(countsJson.inPassings);
+outCount = calculateSum(countsJson.outPassings);
 
 const app = express();
 app.use(cors())
@@ -18,86 +35,83 @@ app.get('/', (req, res) => {
   console.log('get /')
   res.send('OK')
 });
-
+// endpoint /counter palauttaa tiedot maksimimäärästä sallittuja vieraita,
+// sisällä olevista vieraista ja yhteenlaskettu tieto kaikista vieraista.
 app.get('/counter', async (_, res) => {
-  try {
-    console.log('get /counter')
-    res.status(200).json(jsonCounts);
-  } catch (err) {
-    res.status(500).json({ error: err?.message });
+  let counterVariables = {
+    max: maxVisitors,
+    currentVisitors: inCount - outCount,
+    totalVisitors: inCount,
   }
-});
+  try{
+    res.status(200).json(counterVariables)
+  } catch(error){
+    res.status(500).json({ error: error.message });
+  }
+})
+// endpoint /change-max muuttaa sallitun vierasmäärän
+app.post('/change-max', async (req, res) => {
+  console.log(req.body)
+  maxVisitors = req.body.max
+  try{
+    res.status(200).json(`Maksimikävijämäärä päivitetty. Uusi arvo ${maxVisitors}`)
+  } catch(error){
+    res.status(500).json({ error: error.message });
+  }
+})
 
 // IoT-laite lähettää dataa palvelimelle post-metodin kautta.
+// post-pyynnön bodyssa tieto sisääntulleista ja ulosmenneistä
 app.post('/counter', async (req, res) => {
   try {
-    // req.body näyttää tältä:
-    // {
-    //  "direction": "in", (tai "out" riippuen portista)
-    //  "count": 1 (Karrin ohjelmalogiikan mukaan)
-    // }
-
-    // Add timestamp to JSON-object received with req
-    const visit = req.body;
-
+    // Luo aikaleima
     const currentDate = new Date(); 
     const timestamp = currentDate.getTime();
-
-    const visitWithTimestamp = visit
-    visitWithTimestamp.timestamp = timestamp
-
-    // Update the list of all passings with current JSON-obejct and write to JSON-file.
-    if (visit.direction === "in"){
-      jsonCounts.inPassings.push(visitWithTimestamp);
-    } else {
-      jsonCounts.outPassings.push(visitWithTimestamp);
+    // lue requestin body ja luo sen pohjalta uudet oliot sisään- ja uloskuluista
+    const visit = req.body;
+    const visitIn = {
+      "count": visit.countIn,
+      "timestamp": timestamp
     }
-    fs.writeFileSync('counts.json', JSON.stringify(jsonCounts))
+    const visitOut = {
+      "count": visit.countOut,
+      "timestamp": timestamp
+    }
+    // liitä luodut oliot countsJson-olion propertyihin
+    if(visitIn != 0) {
+      countsJson.inPassings.push(visitIn);
+    }
+    if(visitOut != 0) {
+      countsJson.outPassings.push(visitOut);
+    }
 
-    console.log(`created visit: ${JSON.stringify(visitWithTimestamp)}`);
+    // Kirjoita tiedot porttikuluista JSON-tiedostoon
+    fs.writeFileSync('counts.json', JSON.stringify(countsJson))
+    // päivitä sovelluksen muuttujat
+    countsJson = JSON.parse(fs.readFileSync('counts.json'))
+    inCount = calculateSum(countsJson.inPassings);
+    outCount = calculateSum(countsJson.outPassings);
+
+    console.log(`created visit.`);
     res.status(201).json({ visit });
   } catch (err) {
     res.status(500).json({ error: err?.message });
   }
 });
 
-// millainen pyyntö tulee jos on get-pyyntö ja siinä tietoa mukana?
-// app.get('/counter-add', async (req, res) => {
-//   try {
-//     // Add timestamp to reqeust.body-JSON-object
-//     const visit = req.body;
-// 
-//     const currentDate = new Date(); 
-//     const timestamp = currentDate.getTime();
-// 
-//     const visitWithTimestamp = visit
-//     visitWithTimestamp.timestamp = timestamp
-// 
-//     // Update the list of all passings with current data and write to JSON-file.
-//     if (visit.direction === "in"){
-//       jsonCounts.inPassings.push(visitWithTimestamp);
-//       fs.writeFileSync('counts.json', JSON.stringify(jsonCounts))
-//     } else {
-//       jsonCounts.outPassings.push(visitWithTimestamp);
-//       fs.writeFileSync('counts.json', JSON.stringify(jsonCounts))
-//     }
-// 
-//     console.log(`created visit: ${JSON.stringify(visitWithTimestamp)}`);
-//     res.status(201).json({ visit });
-//   } catch (err) {
-//     res.status(500).json({ error: err?.message });
-//   }
-// });
-
+// resetoi paikallisen tallennustiedoston
 app.get('/counter-reset', async (req, res) => {
   try {
-      jsonCounts.inPassings = []
-      jsonCounts.outPassings = []
-      fs.writeFileSync('counts.json', JSON.stringify(jsonCounts))
+      countsJson.inPassings = []
+      countsJson.outPassings = []
+      fs.writeFileSync('counts.json', JSON.stringify(countsJson))
+      // pävitä sovelluksen muuttujat
+      countsJson = JSON.parse(fs.readFileSync('counts.json'))
+      inCount = calculateSum(countsJson.inPassings);
+      outCount = calculateSum(countsJson.outPassings);
 
       console.log('reset')
       res.send('reset succeeded.');
- 
   } catch (error) {
     res.status(500).json({ error: error?.message });
   }
