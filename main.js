@@ -1,19 +1,38 @@
 import express from 'express';
 import cors from 'cors'
-import fs from 'fs'
-// Lisää toiminta maxVisitors muuttamiseen
+import {promises as fsPromises } from 'fs'
+
 const port = process.env.PORT || 3001;
-let countsJson = {}
+// variables
+let jsonData = {}
 let inCount=0;
 let outCount=0;
-let maxVisitors = 10;
-// lue json-tallennustiedosto:
-try{
-  countsJson = JSON.parse(fs.readFileSync('counts.json'))
-} catch(error){
-  console.log("Error reading counts.json")
+
+// read json-file to jsonData and count the sums of inpassings and outpassings
+const readFile = async() => {
+  try{
+    const data = await fsPromises.readFile('counts.json', 'utf8');
+    // const data = await fsPromises.readFile('/home/alliumboeing/projects/laskuri/counts.json', 'utf8');
+    jsonData = JSON.parse(data);
+  } catch(error){
+    console.error("Error reading counts.json", error.message)
+  }
+  
+  inCount = calculateSum(jsonData.inPassings);
+  outCount = calculateSum(jsonData.outPassings);
 }
-// funktio kulkujen summaamiseen. Parametrina lista portin (sisään tai ulos) kuluista
+// function to update json-file
+const updateFile = async(res) => {
+  try {
+    await fsPromises.writeFile('counts.json', JSON.stringify(jsonData));
+    console.log('update succeeded');
+    res.status(201).json({ jsonData });
+  } catch (error) {
+    console.error(`Writing json-file failed: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+}
+// function to count sums of in- and outpassings from jsonData
 const calculateSum = (array) => {
   let sumCount = 0;
   sumCount = array.reduce((acc, currentElement) => {
@@ -22,102 +41,117 @@ const calculateSum = (array) => {
   return sumCount
 }
 
-inCount = calculateSum(countsJson.inPassings);
-outCount = calculateSum(countsJson.outPassings);
-
 const app = express();
-app.use(cors())
+app.use(cors());
 app.use(express.json());
+// middleware to read JSON file on startup
+app.use(async(req, res, next) =>{
+  await readFile();
+  next();
+})
 
-// API-requests:
-// asiakasohjelma saavuttaa palvelimen käskyllä fetch(`${BASE_URL}/...
-app.get('/', (req, res) => {
-  console.log('get /')
-  res.send('OK')
-});
-// endpoint /counter palauttaa tiedot maksimimäärästä sallittuja vieraita,
-// sisällä olevista vieraista ja yhteenlaskettu tieto kaikista vieraista.
+// get /counter endpoint returns an object containing maximum number of allowed visitors,
+// current number of visitors and number of all visitors since last reset
 app.get('/counter', async (_, res) => {
   let counterVariables = {
-    max: maxVisitors,
+    max: jsonData.maxVisitors,
     currentVisitors: inCount - outCount,
     totalVisitors: inCount,
   }
   try{
+    console.log('get /counter succeeded.')
     res.status(200).json(counterVariables)
   } catch(error){
+    console.error(`get /counter failed: ${error.message}`)
     res.status(500).json({ error: error.message });
   }
 })
-// endpoint /change-max muuttaa sallitun vierasmäärän
+// endpoint /change-max changes the maximun number of allowed visitors 
+// and updates the new value to json-file
 app.post('/change-max', async (req, res) => {
-  console.log(req.body)
-  maxVisitors = req.body.max
-  try{
-    res.status(200).json(`Maksimikävijämäärä päivitetty. Uusi arvo ${maxVisitors}`)
-  } catch(error){
-    res.status(500).json({ error: error.message });
-  }
+  // validate request value before updating the the maximum number of allowed visitors
+  if(req.body.max < 0) {
+    console.error(`number can't be of negative value`);
+    res.status(400).json({ error: `number can't be of negative value` })
+    return;
+  } else if (req.body.max === jsonData.maxVisitors) {
+    console.error('the entered new maximum value is already in effect');
+    res.status(400).json({ error: "the entered new maximum value is already in effect" })
+    return;
+  } else {
+    // if validation succeeded: update jsonData and write json-file
+    jsonData.maxVisitors = req.body.max
+    await updateFile(res)
+  } 
 })
 
-// IoT-laite lähettää dataa palvelimelle post-metodin kautta.
-// post-pyynnön bodyssa tieto sisääntulleista ja ulosmenneistä
+// IoT-device sends data to server via post-request.
+// Request body must contain fields for countIn and countOut
 app.post('/counter', async (req, res) => {
-  try {
-    // Luo aikaleima
-    const currentDate = new Date(); 
-    const timestamp = currentDate.getTime();
-    // lue requestin body ja luo sen pohjalta uudet oliot sisään- ja uloskuluista
-    const visit = req.body;
+  const visits = req.body;
+  // validate incoming data: check the required fields and values
+  if(visits.countIn === undefined || visits.countOut === undefined){
+    console.error('error: data is missing a required field');
+    res.status(400).json({ error: 'data is missing a required field' })
+    return;
+  }
+  if(!visits.countIn && !visits.countOut){
+    console.error('error: values are null');
+    res.status(400).json({ error: 'values are null' })
+    return;
+  }
+  if(typeof visits.countIn !== 'number' || visits.countIn < 0 || typeof visits.countOut !== 'number' || visits.countOut < 0) {
+    console.error('error: negative values or invalid data type');
+    res.status(400).json({ error: 'negative values or invalid data type' })
+      return;
+     }
+  // If validating succeeded:
+  // check condition: current visitors can't be less than 0:
+  if((inCount - outCount) + (visits.countIn - visits.countOut) < 0){
+    console.error(`error: number of current visitors can't be of negative value`)
+    res.status(400).json({ error: `number of current visitors can't be of negative value` })
+    return;
+  }
+  // Create timestamp
+  const currentDate = new Date(); 
+  const timestamp = currentDate.getTime();
+  // create objects representing inPassings and outPassings. Push to jsonData-object
+  if (visits.countIn!==0){
     const visitIn = {
-      "count": visit.countIn,
+      "count": visits.countIn,
       "timestamp": timestamp
     }
+    jsonData.inPassings.push(visitIn);
+  }
+  if(visits.countOut !== 0){
     const visitOut = {
-      "count": visit.countOut,
+      "count": visits.countOut,
       "timestamp": timestamp
     }
-    // liitä luodut oliot countsJson-olion propertyihin
-    if(visitIn != 0) {
-      countsJson.inPassings.push(visitIn);
-    }
-    if(visitOut != 0) {
-      countsJson.outPassings.push(visitOut);
-    }
-
-    // Kirjoita tiedot porttikuluista JSON-tiedostoon
-    fs.writeFileSync('counts.json', JSON.stringify(countsJson))
-    // päivitä sovelluksen muuttujat
-    countsJson = JSON.parse(fs.readFileSync('counts.json'))
-    inCount = calculateSum(countsJson.inPassings);
-    outCount = calculateSum(countsJson.outPassings);
-
-    console.log(`created visit.`);
-    res.status(201).json({ visit });
-  } catch (err) {
-    res.status(500).json({ error: err?.message });
+    jsonData.outPassings.push(visitOut);
   }
+  // Write json-file
+  await updateFile(res);
+  // update variables
+  inCount = inCount + visits.countIn;
+  outCount = outCount + visits.countOut;
 });
 
-// resetoi paikallisen tallennustiedoston
+// reset the inpassings and outpassings from json-file
 app.get('/counter-reset', async (req, res) => {
-  try {
-      countsJson.inPassings = []
-      countsJson.outPassings = []
-      fs.writeFileSync('counts.json', JSON.stringify(countsJson))
-      // pävitä sovelluksen muuttujat
-      countsJson = JSON.parse(fs.readFileSync('counts.json'))
-      inCount = calculateSum(countsJson.inPassings);
-      outCount = calculateSum(countsJson.outPassings);
-
-      console.log('reset')
-      res.send('reset succeeded.');
-  } catch (error) {
-    res.status(500).json({ error: error?.message });
-  }
+  jsonData.inPassings = []
+  jsonData.outPassings = []
+  await updateFile(res)
+  // update variables
+  inCount = 0;
+  outCount = 0;
 });
 
-// Start the server
-app.listen(port, () => {
-  console.log(`Server started on port ${port}`);
-});
+// Launching the server
+try {
+  app.listen(port, () => {
+    console.log(`Server started on port ${port}`);
+  });
+} catch (error) {
+  console.error(`Server failed to start: ${error.message}`);
+}
